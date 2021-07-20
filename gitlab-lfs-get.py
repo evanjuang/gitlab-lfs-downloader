@@ -1,26 +1,29 @@
 #!/usr/bin/env python3
 
 import argparse
-import io
-import json
-import os
+import logging
 import requests
-import urllib.parse
+import io
+import os
 import sys
 from base64 import b64encode
 from dotenv import load_dotenv
 from pathlib import Path
 from requests.exceptions import HTTPError
 from tqdm import tqdm
+from urllib.parse import quote_plus
 from urllib3.connection import NewConnectionError
 
 
-HOME = Path(__file__).parent.absolute()
+# HOME = Path(__file__).parent.absolute()
 
 PROJECT = None
 REF = None
 FILE = None
+OUTPUT = None
 
+logging.basicConfig(level=logging.INFO)
+LOG = logging.getLogger()
 
 try:
     load_dotenv()
@@ -34,7 +37,11 @@ try:
     BASIC_AUTH = f'Basic {b64}'
 
 except KeyError as ex:
-    print(f'Please setup required env variable: {str(ex)}')
+    LOG.error(f'Please setup required env variable: {str(ex)}')
+    sys.exit(1)
+
+except Exception as ex:
+    LOG.error(f'Unexpected: {str(ex)}')
     sys.exit(1)
 
 
@@ -42,17 +49,32 @@ def cli():
     global PROJECT
     global FILE
     global REF
+    global OUTPUT
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("project", help="Project Path, ex: ironos/ironos-release/project")
+    USAGE_ENV = """ Create a .env file or export the environment variables below:
+        GIT_HOST=<gitlab host>
+        GIT_TOKEN=<gitlab private token>
+        GIT_USER=<gitlab username>
+        GIT_PWD=<gitlab password>"""
+
+    parser = argparse.ArgumentParser(description=USAGE_ENV,
+                                     formatter_class=argparse.RawTextHelpFormatter)
+
+    parser.add_argument("project", help="Project Path, ex: project_group/project_name")
     parser.add_argument("ref", help="Branch, tag or commit")
-    parser.add_argument("file", help="File Path, ex: squashfs.img")
+    parser.add_argument("file", help="File Path, project_dir/filename")
+    parser.add_argument("-o", "--output-dir", help="Output directory")
 
     args = parser.parse_args()
 
     PROJECT = args.project
     FILE = args.file
     REF = args.ref
+
+    if args.output_dir:
+        OUTPUT = Path(args.output_dir).resolve()
+    else:
+        OUTPUT = Path.cwd()
 
 
 def request(path, method='GET', header=None, req_data=None, timeout=30):
@@ -91,13 +113,13 @@ def request(path, method='GET', header=None, req_data=None, timeout=30):
 
 
 def get_lfs_meta():
-    print('Get meta-data')
+    LOG.info('Get LFS meta-data')
 
     header = {
         "PRIVATE-TOKEN": GIT_TOKEN
     }
 
-    path = f'http://{GIT_HOST}/api/v4/projects/{urllib.parse.quote_plus(PROJECT)}/repository/files/{FILE}/raw?ref={REF}'
+    path = f'http://{GIT_HOST}/api/v4/projects/{quote_plus(PROJECT)}/repository/files/{FILE}/raw?ref={REF}'
 
     resp = request(path, header=header)
 
@@ -108,13 +130,11 @@ def get_lfs_meta():
         elif _.startswith("size"):
             size = _.strip().split()[1]
 
-    #print(f'\t{oid=}, {size=}')
-
     return oid, size
 
 
 def get_lfs_downloand_info(oid, size):
-    print('Get download info')
+    LOG.info('Get download info')
 
     req_data = {
         "operation": "download",
@@ -124,7 +144,7 @@ def get_lfs_downloand_info(oid, size):
                 "size": int(size)
             }
         ],
-         "transfers": [
+        "transfers": [
             "lfs-standalone-file",
             "basic"
         ],
@@ -151,21 +171,21 @@ def get_lfs_downloand_info(oid, size):
 
 
 def dl_target_file(url, header, output):
-    print('Download file')
+    LOG.info(f'Download file: {url}')
 
     with requests.get(url, headers=header, stream=True) as r:
         r.raise_for_status()
 
-        chunk_size=1024
+        chunk_size = 1024
         num_bars = int(int(r.headers['Content-Length']) / chunk_size)
 
         with open(output, 'wb') as f:
             for chunk in tqdm(
                 r.iter_content(chunk_size=chunk_size),
-                total = num_bars,
-                unit = 'KB',
-                desc = str(output),
-                leave = True
+                total=num_bars,
+                unit='KB',
+                desc=str(output),
+                leave=True
             ):
                 f.write(chunk)
 
@@ -177,9 +197,9 @@ try:
 
     href, header = get_lfs_downloand_info(oid, size)
 
-    output = HOME / Path(FILE.rsplit('/')[-1])
+    output = OUTPUT / Path(FILE.rsplit('/')[-1])
 
     dl_target_file(href, header, output)
 
 except Exception as ex:
-    print(f'Unexpected Error: {str(ex)}')
+    LOG.error(f'Unexpected Error: {str(ex)}')
